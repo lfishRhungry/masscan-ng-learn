@@ -286,6 +286,7 @@ enum {
   OPENSSL_UNKNOWN
 };
 
+/*通过 BIO 将openssl的TLS逻辑和我们的用户态TCP栈对接，媒介是该parser*/
 static void
 ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
                  struct ProtocolState *pstate,
@@ -301,6 +302,7 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
   assert(banner1->ssl_ctx != NULL);
   assert(pstate->parser_stream == &banner_http_over_ssl);
 
+  /*对parser自己定义的状态做检测*/
   if (state == OPENSSL_UNKNOWN) {
     is_continue = 0;
   } else {
@@ -345,48 +347,73 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
   }
 
   while (is_continue) {
+    /*对parser自身设定的状态进行识别*/
     switch (state) {
+
+    /*还处于握手阶段*/
     case OPENSSL_HANDSHAKE:
+
       res = SSL_do_handshake(pstate->sub.ssl_dynamic.ssl);
       res_ex = SSL_ERROR_NONE;
       if (res < 0) {
         res_ex = SSL_get_error(pstate->sub.ssl_dynamic.ssl, res);
       }
+
       pstate->sub.ssl_dynamic.handshake_state =
           SSL_get_state(pstate->sub.ssl_dynamic.ssl);
+
+      //!输出版本和密码套件信息
       if (pstate->sub.ssl_dynamic.have_dump_version == false &&
           pstate->sub.ssl_dynamic.handshake_state != TLS_ST_BEFORE &&
           pstate->sub.ssl_dynamic.handshake_state != TLS_ST_CW_CLNT_HELLO &&
-          (SSL_get_current_cipher(pstate->sub.ssl_dynamic.ssl) ||
-           SSL_get_pending_cipher(pstate->sub.ssl_dynamic.ssl))) {
+          (SSL_get_current_cipher(pstate->sub.ssl_dynamic.ssl) ||  /*获取当前连接所使用的加密算法*/
+           SSL_get_pending_cipher(pstate->sub.ssl_dynamic.ssl))) { /*获取当前连接中即将使用的密码套件的详细信息*/
+
         BANNER_VERSION(banout, pstate->sub.ssl_dynamic.ssl);
         BANNER_CIPHER(banout, pstate->sub.ssl_dynamic.ssl);
+
         pstate->sub.ssl_dynamic.have_dump_version = true;
       }
+
+      //!获取并输出与对等方相关的 X.509 证书链
       if (pstate->sub.ssl_dynamic.have_dump_cert == false &&
           SSL_get_peer_cert_chain(pstate->sub.ssl_dynamic.ssl) != NULL) {
+
         if (banner1->is_capture_cert) {
           BANNER_CERTS(banout, pstate->sub.ssl_dynamic.ssl);
         }
+
         BANNER_NAMES(banout, pstate->sub.ssl_dynamic.ssl);
         pstate->sub.ssl_dynamic.have_dump_cert = true;
       }
 
+      //握手完成
       if (res == 1) {
+
+        //握手成功并且 SSL 的状态是正确的
         if (pstate->sub.ssl_dynamic.handshake_state == TLS_ST_OK) {
           struct ProtocolState *psub_state = pstate->sub.ssl_dynamic.psub_state;
+          
+          //切换协议标识
           psub_state->app_proto = PROTO_HTTPS;
+          //设置子协议的parser为http
           psub_state->parser_stream = &banner_http;
+          //为子parser初始化
           init_application_proto(banner1, psub_state, resend_payload, banout,
                                  keyout);
+          //更新parser状态
           state = OPENSSL_APP_HELLO;
-        } else {
+
+        } else { //握手完成但是失败了
           LOG(LEVEL_WARNING, "Unknown handshake state %d\n",
               pstate->sub.ssl_dynamic.handshake_state);
           state = OPENSSL_UNKNOWN;
         }
-      } else if (res < 0 && res_ex == SSL_ERROR_WANT_READ) {
+
+      } else if (res < 0 && res_ex == SSL_ERROR_WANT_READ) { //还需继续握手
+
         size_t offset = 0;
+
         while (true) {
           if (pstate->sub.ssl_dynamic.data_max_len - offset <= 0) {
             unsigned char *tmp_data = NULL;
@@ -410,6 +437,7 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
               pstate->sub.ssl_dynamic.wbio,
               pstate->sub.ssl_dynamic.data + offset,
               (unsigned int)(pstate->sub.ssl_dynamic.data_max_len - offset));
+
           if (res > 0) {
             LOG(LEVEL_INFO, "[ssl_parse_record]BIO_read: %d\n", res);
             offset += (size_t)res;
@@ -424,11 +452,13 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
             break;
           }
         }
+
         if (state != OPENSSL_UNKNOWN) {
           tcp_transmit(more, pstate->sub.ssl_dynamic.data, offset, 0);
           is_continue = 0;
         }
-      } else {
+
+      } else {  //无法继续握手 失败
         LOG(LEVEL_DEBUG,
             "[ssl_parse_record]SSL_do_handshake failed with error: %d, "
             "ex_error: %d\n",
@@ -437,18 +467,27 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
         state = OPENSSL_UNKNOWN;
       }
       break;
+
+    //!到子parser说hello的时候了
     case OPENSSL_APP_HELLO: {
+
       struct ProtocolState *psub_state = pstate->sub.ssl_dynamic.psub_state;
       struct InteractiveData sub_more = {0};
+
+      //获取子parser的hello然后给BIO
       application_receive_hello(banner1, psub_state, resend_payload, banout,
                                 keyout, &sub_more);
+
       assert(sub_more.m_payload != NULL && sub_more.m_length != 0);
+
       res = 1;
+
       if (sub_more.m_payload != NULL && sub_more.m_length != 0) {
         res = SSL_write(pstate->sub.ssl_dynamic.ssl, sub_more.m_payload,
                         sub_more.m_length);
         free_interactive_data(&sub_more);
       }
+
       if (res <= 0) {
         res_ex = SSL_get_error(pstate->sub.ssl_dynamic.ssl, res);
         LOG(LEVEL_WARNING, "[ssl_parse_record]SSL_write error: %d %d\n", res,
@@ -502,6 +541,7 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
         }
       }
     } break;
+
     case OPENSSL_APP_RECEIVE_NEXT:
       while (true) {
         res =
@@ -535,11 +575,13 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
         }
       }
       break;
+
     case OPENSSL_APP_CLOSE:
       tcp_close(more);
       is_continue = 0;
       state = OPENSSL_UNKNOWN;
       break;
+
     case OPENSSL_UNKNOWN:
       switch_application_proto(banner1, pstate, resend_payload, banout, keyout,
                                PROTO_SSL3, &banner_ssl);
@@ -551,48 +593,45 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
   return;
 }
 
-/*void print_all_chipher_suit(SSL_CTX *ctx) {
-        STACK_OF(SSL_CIPHER) *sk_ciphers;
-        int i_cipher;
 
-        sk_ciphers = SSL_CTX_get_ciphers(ctx);
-        for(i_cipher = 0; i_cipher < sk_SSL_CIPHER_num(sk_ciphers); i_cipher++)
-{ const SSL_CIPHER *cipher; cipher = sk_SSL_CIPHER_value(sk_ciphers, i_cipher);
-                LOG(
-                        LEVEL_WARNING, "0x%X[%d]: %s\n",
-SSL_CIPHER_get_protocol_id(cipher), i_cipher, SSL_CIPHER_get_name(cipher));
-        }
-}*/
-
+/*主要目的是初始化一个公用的 SSL_CTX*/
 static void *ssl_init(struct Banner1 *banner1) {
   int res;
-  const SSL_METHOD *meth;
-  SSL_CTX *ctx;
 
   LOG(LEVEL_INFO, "[ssl_init] >>>\n");
 
-  meth = TLS_method();
+  /*SSL_METHOD 定义了在 SSL 握手过程中进行加密算法协商时客户端允许使用哪些加密算法*/
+  const SSL_METHOD *meth = TLS_method();
   if (meth == NULL) {
     LOG(LEVEL_WARNING, "TLS_method error\n");
     LOGopenssl(LEVEL_WARNING);
     goto error2;
   }
 
-  ctx = SSL_CTX_new(meth);
+  /*SSL_CTX数据结构主要用于SSL握手前的环境准备，
+  设置CA文件和目录、设置SSL握手中的证书文件和私钥、
+  设置协议版本以及其他一些SSL握手时的选项。*/
+  SSL_CTX *ctx = SSL_CTX_new(meth);
   if (ctx == NULL) {
     LOG(LEVEL_WARNING, "SSL_CTX_new error\n");
     LOGopenssl(LEVEL_WARNING);
     goto error3;
   }
 
+  /*设置 TLS/SSL 连接时的证书验证模式：无需验证客户端证书*/
   SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+  /*支持所有版本*/
   SSL_CTX_set_min_proto_version(ctx, 0);
   SSL_CTX_set_max_proto_version(ctx, 0);
+  /*用于设置 SSL/TLS 安全级别 可以将其用于限制支持的加密算法和协议版本，以确保通信的安全性
+  这里允许所有内容*/
   SSL_CTX_set_security_level(ctx, 0);
+  /*设置 TLSv1.2 及以下版本时 可用的密码套件*/
   res = SSL_CTX_set_cipher_list(ctx, "ALL:eNULL");
   if (res != 1) {
     LOG(LEVEL_WARNING, "SSL_CTX_set_cipher_list error %d\n", res);
   }
+  /*设置 TLSv1.3 时 可用的密码套件，这里把可用的都罗列了 （顺序敏感）*/
   res = SSL_CTX_set_ciphersuites(
       ctx, "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:"
            "TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_CCM_SHA256:"
@@ -601,6 +640,7 @@ static void *ssl_init(struct Banner1 *banner1) {
     LOG(LEVEL_WARNING, "SSL_CTX_set_ciphersuites error %d\n", res);
   }
 
+  /*设置 TLS 密钥记录回调函数*/
   if (banner1->is_capture_key) {
     SSL_CTX_set_keylog_callback(ctx, ssl_keylog_callback);
   }
@@ -617,6 +657,7 @@ error2:
   return NULL;
 }
 
+/*清理在 `ssl_init` 中设置的公用 SSL_CTX*/
 static void ssl_cleanup(struct Banner1 *banner1) {
   if (banner1->ssl_ctx != NULL) {
     SSL_CTX_free(banner1->ssl_ctx);
@@ -625,6 +666,7 @@ static void ssl_cleanup(struct Banner1 *banner1) {
   return;
 }
 
+/*清理 ssl_transmit_init 中创建的资源*/
 static void ssl_transmit_cleanup(const struct Banner1 *banner1,
                                  struct ProtocolState *pstate,
                                  struct ResendPayload *resend_payload) {
@@ -670,6 +712,7 @@ static void ssl_transmit_cleanup(const struct Banner1 *banner1,
   }
 }
 
+/*主要是为具体一个 SSL 连接进行开始前的准备工作*/
 static void ssl_transmit_init(const struct Banner1 *banner1,
                               struct ProtocolState *pstate,
                               struct ResendPayload *resend_payload,
@@ -692,6 +735,7 @@ static void ssl_transmit_init(const struct Banner1 *banner1,
     goto error0;
   }
 
+  /*这个data 是给 BIO 用来中转读写数据的*/
   data = (unsigned char *)malloc(data_max_len);
   if (data == NULL) {
     LOG(LEVEL_WARNING, "SSL alloc memory error 0x%X\n", data_max_len);
@@ -705,6 +749,7 @@ static void ssl_transmit_init(const struct Banner1 *banner1,
     goto error2;
   }
 
+  /*从内存源创建用于读的 BIO*/
   rbio = BIO_new(BIO_s_mem());
   if (rbio == NULL) {
     LOG(LEVEL_WARNING, "BIO_new(read) error\n");
@@ -712,6 +757,7 @@ static void ssl_transmit_init(const struct Banner1 *banner1,
     goto error3;
   }
 
+  /*从内存源创建用于写的 BIO*/
   wbio = BIO_new(BIO_s_mem());
   if (wbio == NULL) {
     LOG(LEVEL_WARNING, "BIO_new(write) error\n");
@@ -719,6 +765,7 @@ static void ssl_transmit_init(const struct Banner1 *banner1,
     goto error4;
   }
 
+  /*用于创建一个新的 SSL 结构，它代表了一个具体的 SSL 会话*/
   ssl = SSL_new(banner1->ssl_ctx);
   if (ssl == NULL) {
     LOG(LEVEL_WARNING, "SSL_new error\n");
@@ -726,15 +773,21 @@ static void ssl_transmit_init(const struct Banner1 *banner1,
     goto error5;
   }
 
+  /*将 SSL 对象设置为客户端模式*/
   SSL_set_connect_state(ssl);
+  /*将自定义的 BIO 对象与 SSL 对象关联起来，实现自定义的读写操作*/
   SSL_set_bio(ssl, rbio, wbio);
 
+  /*将应用程序数据存储在SSL对象中的arg中，使用idx进行索引
+  随后使用SSL_get_ex_data来检索该数据
+  这里存储一个 banout 用于之后的 banner 输出*/
   res = SSL_set_ex_data(ssl, 0, banout);
   if (res != 1) {
     LOG(LEVEL_WARNING, "SSL_set_ex_data banout error\n");
     LOGopenssl(LEVEL_WARNING);
     goto error6;
   }
+  /*把密钥输出回调函数也存起来*/
   if (!banner1->is_capture_key) {
     keyout = NULL;
   }
@@ -745,14 +798,18 @@ static void ssl_transmit_init(const struct Banner1 *banner1,
     goto error7;
   }
 
+  /*当设置了信息回调函数后，它会在发生重要事件时被调用，例如状态变化、警报出现或错误发生。*/
   SSL_set_info_callback(ssl, ssl_info_callback);
 
+  /*这个状态是 openssl 握手用的*/
   pstate->sub.ssl_dynamic.handshake_state = TLS_ST_BEFORE;
+  /*几个重要的结构都保存在状态结构中*/
   pstate->sub.ssl_dynamic.ssl = ssl;
   pstate->sub.ssl_dynamic.rbio = rbio;
   pstate->sub.ssl_dynamic.wbio = wbio;
   pstate->sub.ssl_dynamic.data = data;
   pstate->sub.ssl_dynamic.data_max_len = data_max_len;
+  /*子状态应该是给 SSL 上次协议使用的*/
   pstate->sub.ssl_dynamic.psub_state = psub_state;
 
   return;
@@ -787,6 +844,7 @@ error0:
   return;
 }
 
+/*主要是完成 TLS 握手，注意这里需要进行数据的交互*/
 static void ssl_transmit_hello(const struct Banner1 *banner1,
                                struct ProtocolState *pstate,
                                struct ResendPayload *resend_payload,
@@ -806,10 +864,11 @@ static void ssl_transmit_hello(const struct Banner1 *banner1,
   }
 
   if (res == 1) {
-    // success
+    // success 实际上这里是不可能成功的 因为还没有任何数据发送出去
   } else if (res < 0 && res_ex == SSL_ERROR_WANT_READ) {
     offset = 0;
     while (true) {
+      /*数据中转区大小不够 进行2倍扩张*/
       if (pstate->sub.ssl_dynamic.data_max_len - offset <= 0) {
         unsigned char *tmp_data = NULL;
         tmp_data =
@@ -825,6 +884,7 @@ static void ssl_transmit_hello(const struct Banner1 *banner1,
             pstate->sub.ssl_dynamic.data_max_len * 2;
       }
 
+      /*获取 SSL 想要发送（写入）的数据*/
       res = BIO_read(pstate->sub.ssl_dynamic.wbio,
                      pstate->sub.ssl_dynamic.data + offset,
                      (int)(pstate->sub.ssl_dynamic.data_max_len - offset));
@@ -848,8 +908,10 @@ static void ssl_transmit_hello(const struct Banner1 *banner1,
     goto error1;
   }
 
+  /*保存 SSL 的状态*/
   pstate->sub.ssl_dynamic.handshake_state =
       SSL_get_state(pstate->sub.ssl_dynamic.ssl);
+  /*这里是真正发送 ClientHello 的地方*/
   tcp_transmit(more, pstate->sub.ssl_dynamic.data, offset, 0);
   return;
 error1:

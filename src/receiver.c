@@ -285,6 +285,7 @@ void receive_handle_thread(void *v) {
   }
 }
 
+/*真正处理数据包的流程*/
 static void handle_packet(struct ThreadPair *parms, struct Output *out,
                           struct DedupTable *dedup,
                           struct DedupTable *echo_reply_dedup,
@@ -458,12 +459,13 @@ static void handle_packet(struct ThreadPair *parms, struct Output *out,
                         buf, sizeof(buf)));
   }
 
-  /* If recording --banners, create a new "TCP Control Block (TCB)" */
+  //!这里开始正式的有状态TCP数据包处理流程 只有开启banner模式才进入
   tcb = NULL;
   if (tcpcon) {
-    /* does a TCB already exist for this connection? */
+    //首先尝试在表中查找tcb（不一定找到）
     tcb = tcb_lookup(tcpcon, &ip_me, &ip_them, port_me, port_them);
 
+    //!如果是synack 不管有没有tcb 都在这处理（有可能要为 synack 创建新 tcb）
     if (TCP_IS_SYNACK(p_recv->px, p_recv->parsed.transport_offset)) {
       ipaddress_formatted_t fmt;
       ipaddress_fmt(&fmt, &ip_them);
@@ -473,6 +475,7 @@ static void handle_packet(struct ThreadPair *parms, struct Output *out,
         return;
       }
 
+      //如果是SYNACK且cookie正确 可能需要创建tcb
       if (tcb == NULL) {
         tcb =
             tcpcon_create_tcb(tcpcon, &ip_me, &ip_them, port_me, port_them,
@@ -480,18 +483,24 @@ static void handle_packet(struct ThreadPair *parms, struct Output *out,
         pixie_locked_inc_d64(&parms->total_tcbs);
       }
 
+      //给该tcb输入参数，内部会进行该tcb相应的状态转换（以及各种结果保留和输出等）
       Q += stack_incoming_tcp(tcpcon, tcb, TCP_WHAT_SYNACK, 0, 0, p_recv->secs,
                               p_recv->usecs, seqno_them + 1);
 
     } else if (tcb) {
-      /* If this is an ACK, then handle that first */
+      //!不是synack 但是已经有该连接的tcb了
+
+
+
+      //对于ack 不管有没有数据 首先要在状态中体现其确认功能
       if (TCP_IS_ACK(p_recv->px, p_recv->parsed.transport_offset)) {
         Q += stack_incoming_tcp(tcpcon, tcb, TCP_WHAT_ACK, 0, seqno_me,
                                 p_recv->secs, p_recv->usecs, seqno_them);
       }
 
-      /* If this contains payload, handle that second */
+      //如果包含数据 不管是什么flag 在状态机中进行数据载荷相关的处理及状态转换
       if (p_recv->parsed.app_length) {
+        //优雅挥手并包含数据
         if (TCP_IS_FIN(p_recv->px, p_recv->parsed.transport_offset) &&
             !TCP_IS_RST(p_recv->px, p_recv->parsed.transport_offset)) {
           Q += stack_incoming_tcp(tcpcon, tcb, TCP_WHAT_DATA_END,
@@ -499,14 +508,16 @@ static void handle_packet(struct ThreadPair *parms, struct Output *out,
                                   p_recv->parsed.app_length, p_recv->secs,
                                   p_recv->usecs, seqno_them);
         } else {
+          //其他类型包含数据
           Q += stack_incoming_tcp(tcpcon, tcb, TCP_WHAT_DATA,
                                   p_recv->px + p_recv->parsed.app_offset,
                                   p_recv->parsed.app_length, p_recv->secs,
                                   p_recv->usecs, seqno_them);
         }
       } else {
-        /* If this is a FIN, handle that. Note that ACK +
-         * payload + FIN can come together */
+        //如果没有数据载荷
+
+        //优雅挥手且不携带载荷的情况
         if (TCP_IS_FIN(p_recv->px, p_recv->parsed.transport_offset) &&
             !TCP_IS_RST(p_recv->px, p_recv->parsed.transport_offset)) {
           Q += stack_incoming_tcp(tcpcon, tcb, TCP_WHAT_FIN, 0,
@@ -523,13 +534,13 @@ static void handle_packet(struct ThreadPair *parms, struct Output *out,
     } else if (TCP_IS_FIN(p_recv->px, p_recv->parsed.transport_offset)) {
       ipaddress_formatted_t fmt;
       ipaddress_fmt(&fmt, &ip_them);
-      /* NO TCB!
-       *  This happens when we've sent a FIN, deleted our connection,
-       *  but the other side didn't get the packet. */
+      //!没有tcb的情况 除了异常之外 可能是当我们已经发送fin之后 tcb 就被删除了 但是对方没有收到该包
+
       LOG(LEVEL_DEBUG_2, "%s: received FIN but no TCB\n", fmt.string);
       if (TCP_IS_RST(p_recv->px, p_recv->parsed.transport_offset)) {
-        /* ignore if it's own TCP flag is set */
+        //这种情况下不处理带有rst的包
       } else {
+        //其他的话就回复rst
         int is_suppress;
         is_suppress =
             rstfilter_is_filter(rf, &ip_me, port_me, &ip_them, port_them);
@@ -598,13 +609,10 @@ static void handle_packet(struct ThreadPair *parms, struct Output *out,
 }
 
 /***************************************************************************
- *
- * Asynchronous receive thread
- *
- * The transmit and receive threads run independently of each other. There
- * is no record what was transmitted. Instead, the transmit thread sets a
- * "SYN-cookie" in transmitted packets, which the receive thread will then
- * use to match up requests with responses.
+ 收包主线程
+   创建、初始化和销毁资源
+   管理多个receive_handle_thread 负责真正处理数据包
+   管理一个receive_scheduler_thread 负责调度几个收包的线程
  ***************************************************************************/
 void receive_thread(void *v) {
 

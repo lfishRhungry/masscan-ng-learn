@@ -2,6 +2,11 @@
 #define PROTO_INTERACTIVE_H
 #include <stdio.h>
 
+/*这个 TCP API 的 wrapper 是为了让 parser 不直接调用用户态TCP协议栈接口
+取代了原来的自定义 socket
+这样的话可以使得 parser 将数据收发的需求传递给下层协议
+这允许了 SSL 中间层的存在*/
+
 struct InteractiveData {
   const void *m_payload;
   unsigned m_length;
