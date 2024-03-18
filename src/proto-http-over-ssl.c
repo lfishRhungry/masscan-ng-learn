@@ -310,9 +310,11 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
   }
 
   if (is_continue && px != NULL && length != 0) {
+
     size_t offset = 0;
     uint64_t now_time = pixie_gettime();
     res = 0;
+
     while (offset < length) {
       res = BIO_write(pstate->sub.ssl_dynamic.rbio, px + offset,
                       (unsigned int)min(16384, length - offset));
@@ -331,6 +333,7 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
         return;
       }
     }
+
     now_time = pixie_gettime() - now_time;
     if (length > 16384 || now_time > 1000000) {
       LOGip(LEVEL_WARNING, &pstate->ip, pstate->port,
@@ -355,6 +358,7 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
 
       res = SSL_do_handshake(pstate->sub.ssl_dynamic.ssl);
       res_ex = SSL_ERROR_NONE;
+
       if (res < 0) {
         res_ex = SSL_get_error(pstate->sub.ssl_dynamic.ssl, res);
       }
@@ -542,6 +546,7 @@ ssl_parse_record(const struct Banner1 *banner1, void *banner1_private,
       }
     } break;
 
+    //!在SSL收到信息 传递给子parser 但是无法将子parser的消息发送出去
     case OPENSSL_APP_RECEIVE_NEXT:
       while (true) {
         res =
