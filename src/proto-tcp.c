@@ -785,8 +785,6 @@ struct TCP_Control_Block *tcb_lookup(struct TCP_ConnectionTable *tcpcon,
   size_t index;
   struct TCP_Control_Block tmp;
   struct TCP_Control_Block *tcb;
-  ipaddress_formatted_t fmt1;
-  ipaddress_formatted_t fmt2;
 
   tmp.ip_me = *ip_me;
   tmp.ip_them = *ip_them;
@@ -794,11 +792,6 @@ struct TCP_Control_Block *tcb_lookup(struct TCP_ConnectionTable *tcpcon,
   tmp.port_them = (unsigned short)port_them;
 
   index = (size_t)tcb_hash(ip_me, port_me, ip_them, port_them, tcpcon->entropy);
-
-  ipaddress_fmt(&fmt1, ip_me);
-  ipaddress_fmt(&fmt2, ip_them);
-  LOG(LEVEL_INFO, "tcb_hash(0x%08" PRIx64 ") = %s %u %s %u\n", index,
-      fmt1.string, port_me, fmt2.string, port_them);
 
   /* Hash to an entry in the table, then follow a linked list from
    * that point forward. */

@@ -605,7 +605,8 @@ static void *ssl_init(struct Banner1 *banner1) {
 
   LOG(LEVEL_INFO, "[ssl_init] >>>\n");
 
-  /*SSL_METHOD 定义了在 SSL 握手过程中进行加密算法协商时客户端允许使用哪些加密算法*/
+  /*SSL_METHOD 定义了在 SSL 握手过程中进行加密算法协商时客户端允许使用哪些加密算法
+  这里创建的方法支持从3.0到1.3*/
   const SSL_METHOD *meth = TLS_method();
   if (meth == NULL) {
     LOG(LEVEL_WARNING, "TLS_method error\n");
@@ -849,7 +850,7 @@ error0:
   return;
 }
 
-/*主要是完成 TLS 握手，注意这里需要进行数据的交互*/
+/*主要是完成 TLS 握手中创建和发送 ClientHello的部分*/
 static void ssl_transmit_hello(const struct Banner1 *banner1,
                                struct ProtocolState *pstate,
                                struct ResendPayload *resend_payload,
